@@ -104,10 +104,18 @@ EOL
 }
 
 create_db() {
+
     local ch_user=${GH__CLICKHOUSE__USER:=default}
     local ch_pass=${GH__CLICKHOUSE__PASSWORD:=}
     local out
-    echo "Create DB: ${GH__CLICKHOUSE__DB:=graphite}"
+
+    if [[ "$1" ]]; then
+        GH__CLICKHOUSE__HOST=$1
+        echo "Clickhouse Host: " ${GH__CLICKHOUSE__HOST}
+    fi
+
+
+    echo "Create DB if not exists : ${GH__CLICKHOUSE__DB:=graphite}"
     out=$(wget -q -S -O -  --post-data="CREATE DATABASE IF NOT EXISTS ${GH__CLICKHOUSE__DB:=graphite}" \
         --header="X-ClickHouse-User: $ch_user" \
         --header="X-ClickHouse-Key: $ch_pass" \
@@ -117,9 +125,13 @@ create_db() {
         echo "$out"
         exit 1
      fi
-     
-     echo "Create Table: ${GH__CLICKHOUSE__DB:=graphite}.metrics"
-     out=$(wget -q -S -O -  --post-data="CREATE TABLE IF NOT EXISTS ${GH__CLICKHOUSE__DB:=graphite}.metrics ( date Date DEFAULT toDate(0),  name String,  level UInt16,  parent String,  updated DateTime DEFAULT now(),  status Enum8('SIMPLE' = 0, 'BAN' = 1, 'APPROVED' = 2, 'HIDDEN' = 3, 'AUTO_HIDDEN' = 4)) ENGINE = ReplacingMergeTree(date, (parent, name), 1024, updated)" \
+
+     echo "Create Table if not exists : ${GH__CLICKHOUSE__DB:=graphite}.metrics"
+     local metrics_engine="ReplacingMergeTree(date, (parent, name), 1024, updated)"
+     if [[ "${GH__CLICKHOUSE__REPLICATED_TABLE}" ]]; then
+        metrics_engine="ReplicatedReplacingMergeTree('/clickhouse/tables/graphite.metrics', '{replica}', date, (parent, name), 1024, updated)"
+     fi
+     out=$(wget -q -S -O -  --post-data="CREATE TABLE IF NOT EXISTS ${GH__CLICKHOUSE__DB:=graphite}.metrics ( date Date DEFAULT toDate(0),  name String,  level UInt16,  parent String,  updated DateTime DEFAULT now(),  status Enum8('SIMPLE' = 0, 'BAN' = 1, 'APPROVED' = 2, 'HIDDEN' = 3, 'AUTO_HIDDEN' = 4)) ENGINE = $metrics_engine" \
         --header="X-ClickHouse-User: $ch_user" \
         --header="X-ClickHouse-Key: $ch_pass" \
         "http://${GH__CLICKHOUSE__HOST:=localhost}:${GH__CLICKHOUSE__PORT:=8123}/" 2>&1)
@@ -128,13 +140,15 @@ create_db() {
         echo "$out"
         exit 1
      fi
-    
+
      local data_engine="GraphiteMergeTree(date, (metric, timestamp), 8192, 'graphite_rollup')"
-     if [[ "${GH_CLICKHOUSE_USE_GRAPHITE_ENGINE:=TRUE}" != 'TRUE' ]]; then
-         data_engine="ReplacingMergeTree(date, (metric, timestamp), 8192, updated)"
+     if [[  "${GH__CLICKHOUSE__REPLICATED_TABLE}" ]]; then
+        data_engine="ReplicatedGraphiteMergeTree('/clickhouse/tables/graphite.data', '{replica}',date, (metric, timestamp), 8192, 'graphite_rollup')"
+     elif [[ "${GH_CLICKHOUSE_USE_GRAPHITE_ENGINE:=TRUE}" != 'TRUE' ]]; then
+        data_engine="ReplacingMergeTree(date, (metric, timestamp), 8192, updated)"
      fi
 
-     echo "Create Table: ${GH__CLICKHOUSE__DB:=graphite}.data Engine: $data_engine"
+     echo "Create Table  if not exists : ${GH__CLICKHOUSE__DB:=graphite}.data Engine: $data_engine"
      out=$(wget -q -S -O - --post-data="CREATE TABLE IF NOT EXISTS ${GH__CLICKHOUSE__DB:=graphite}.data ( metric String,  value Float64,  timestamp UInt32,  date Date,  updated UInt32) ENGINE = $data_engine" \
         --header="X-ClickHouse-User: $ch_user" \
         --header="X-ClickHouse-Key: $ch_pass" \
@@ -150,7 +164,18 @@ create_db() {
 
 generate_vmoptions
 generate_properties
-create_db
+#createdb
+if ${GH__CLICKHOUSE__REPLICATED_TABLE}; then
+   # expecting GH__CLICKHOUSE__REPLICAS=host1 host2 host3  : "space separated"
+   for replica in ${GH__CLICKHOUSE__REPLICAS}
+   do
+        #echo $replica
+        create_db $replica
+   done
+else
+   #standalone
+   create_db ${GH__CLICKHOUSE__HOST:=localhost}
+fi
 
 echo "STARTING"
 
